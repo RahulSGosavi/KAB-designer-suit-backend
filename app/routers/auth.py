@@ -100,6 +100,11 @@ async def register(request: RegisterRequest):
         if len(request.password) < 6:
             raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
         
+        # Bcrypt has a 72-byte limit - truncate if longer (1 char = 1 byte for ASCII)
+        password_bytes = request.password.encode('utf-8')
+        if len(password_bytes) > 72:
+            raise HTTPException(status_code=400, detail="Password cannot be longer than 72 characters")
+        
         # Check if user already exists
         existing_user = execute_query(
             "SELECT id FROM users WHERE email = %s",
@@ -113,8 +118,13 @@ async def register(request: RegisterRequest):
         base_slug = create_company_slug(request.companyName)
         company_slug = get_unique_company_slug(base_slug)
         
-        # Hash password
-        password_hash = pwd_context.hash(request.password)
+        # Hash password (bcrypt handles up to 72 bytes, we've already validated)
+        try:
+            password_hash = pwd_context.hash(request.password)
+        except ValueError as e:
+            if "72" in str(e) or "bytes" in str(e).lower():
+                raise HTTPException(status_code=400, detail="Password cannot be longer than 72 characters")
+            raise HTTPException(status_code=400, detail=f"Password hashing failed: {str(e)}")
         
         # Use a single connection for both operations to ensure consistency
         conn = get_db()
@@ -233,6 +243,11 @@ async def register(request: RegisterRequest):
 @router.post("/login")
 async def login(request: LoginRequest):
     try:
+        # Validate password length (bcrypt 72-byte limit)
+        password_bytes = request.password.encode('utf-8')
+        if len(password_bytes) > 72:
+            raise HTTPException(status_code=400, detail="Password cannot be longer than 72 characters")
+        
         # Find user with company
         result = execute_query(
             """
@@ -251,7 +266,12 @@ async def login(request: LoginRequest):
         user = result[0]
         
         # Verify password
-        if not pwd_context.verify(request.password, user["password_hash"]):
+        try:
+            if not pwd_context.verify(request.password, user["password_hash"]):
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+        except ValueError as e:
+            if "72" in str(e) or "bytes" in str(e).lower():
+                raise HTTPException(status_code=400, detail="Password cannot be longer than 72 characters")
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
         # Generate token
