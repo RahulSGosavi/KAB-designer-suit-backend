@@ -7,12 +7,23 @@ from datetime import datetime, timedelta
 import os
 import re
 import psycopg2
+import hashlib
 from psycopg2.extras import RealDictCursor
 from app.config.db import execute_query, get_db, return_db
 from app.middleware.error_handler import AppError
 
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def prepare_password_for_bcrypt(password: str) -> str:
+    """
+    Pre-hash password with SHA-256 to allow passwords longer than bcrypt's 72-byte limit.
+    This is a common pattern that maintains security while removing length restrictions.
+    """
+    # Hash with SHA-256 (always 64 bytes, well under bcrypt's 72-byte limit)
+    password_bytes = password.encode('utf-8')
+    sha256_hash = hashlib.sha256(password_bytes).hexdigest()
+    return sha256_hash
 
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
 JWT_EXPIRES_IN = os.getenv("JWT_EXPIRES_IN", "7d")
@@ -100,11 +111,6 @@ async def register(request: RegisterRequest):
         if len(request.password) < 6:
             raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
         
-        # Bcrypt has a 72-byte limit - truncate if longer (1 char = 1 byte for ASCII)
-        password_bytes = request.password.encode('utf-8')
-        if len(password_bytes) > 72:
-            raise HTTPException(status_code=400, detail="Password cannot be longer than 72 characters")
-        
         # Check if user already exists
         existing_user = execute_query(
             "SELECT id FROM users WHERE email = %s",
@@ -118,13 +124,10 @@ async def register(request: RegisterRequest):
         base_slug = create_company_slug(request.companyName)
         company_slug = get_unique_company_slug(base_slug)
         
-        # Hash password (bcrypt handles up to 72 bytes, we've already validated)
-        try:
-            password_hash = pwd_context.hash(request.password)
-        except ValueError as e:
-            if "72" in str(e) or "bytes" in str(e).lower():
-                raise HTTPException(status_code=400, detail="Password cannot be longer than 72 characters")
-            raise HTTPException(status_code=400, detail=f"Password hashing failed: {str(e)}")
+        # Hash password: pre-hash with SHA-256 to support any length, then bcrypt
+        # This allows passwords longer than bcrypt's 72-byte limit
+        prepared_password = prepare_password_for_bcrypt(request.password)
+        password_hash = pwd_context.hash(prepared_password)
         
         # Use a single connection for both operations to ensure consistency
         conn = get_db()
@@ -243,11 +246,6 @@ async def register(request: RegisterRequest):
 @router.post("/login")
 async def login(request: LoginRequest):
     try:
-        # Validate password length (bcrypt 72-byte limit)
-        password_bytes = request.password.encode('utf-8')
-        if len(password_bytes) > 72:
-            raise HTTPException(status_code=400, detail="Password cannot be longer than 72 characters")
-        
         # Find user with company
         result = execute_query(
             """
@@ -265,13 +263,16 @@ async def login(request: LoginRequest):
         
         user = result[0]
         
-        # Verify password
-        try:
-            if not pwd_context.verify(request.password, user["password_hash"]):
-                raise HTTPException(status_code=401, detail="Invalid credentials")
-        except ValueError as e:
-            if "72" in str(e) or "bytes" in str(e).lower():
-                raise HTTPException(status_code=400, detail="Password cannot be longer than 72 characters")
+        # Verify password: try new method (SHA-256 + bcrypt) first, then fallback to old method (direct bcrypt)
+        # This ensures backward compatibility with existing users
+        prepared_password = prepare_password_for_bcrypt(request.password)
+        password_valid = pwd_context.verify(prepared_password, user["password_hash"])
+        
+        # If new method fails, try old method for backward compatibility
+        if not password_valid:
+            password_valid = pwd_context.verify(request.password, user["password_hash"])
+        
+        if not password_valid:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
         # Generate token
