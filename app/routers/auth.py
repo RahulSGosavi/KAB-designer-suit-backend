@@ -126,8 +126,15 @@ async def register(request: RegisterRequest):
         
         # Hash password: pre-hash with SHA-256 to support any length, then bcrypt
         # This allows passwords longer than bcrypt's 72-byte limit
-        prepared_password = prepare_password_for_bcrypt(request.password)
-        password_hash = pwd_context.hash(prepared_password)
+        try:
+            prepared_password = prepare_password_for_bcrypt(request.password)
+            password_hash = pwd_context.hash(prepared_password)
+        except Exception as e:
+            # Catch any bcrypt errors and provide user-friendly message
+            error_msg = str(e)
+            if "72" in error_msg or "bytes" in error_msg.lower():
+                raise HTTPException(status_code=400, detail="Password hashing failed. Please try a shorter password.")
+            raise HTTPException(status_code=400, detail="Password hashing failed. Please try again.")
         
         # Use a single connection for both operations to ensure consistency
         conn = get_db()
@@ -265,12 +272,25 @@ async def login(request: LoginRequest):
         
         # Verify password: try new method (SHA-256 + bcrypt) first, then fallback to old method (direct bcrypt)
         # This ensures backward compatibility with existing users
-        prepared_password = prepare_password_for_bcrypt(request.password)
-        password_valid = pwd_context.verify(prepared_password, user["password_hash"])
+        password_valid = False
         
-        # If new method fails, try old method for backward compatibility
+        try:
+            prepared_password = prepare_password_for_bcrypt(request.password)
+            password_valid = pwd_context.verify(prepared_password, user["password_hash"])
+        except (ValueError, Exception) as e:
+            # If new method fails due to error (not just wrong password), try old method
+            pass
+        
+        # If new method fails, try old method for backward compatibility (only if password is <= 72 bytes)
         if not password_valid:
-            password_valid = pwd_context.verify(request.password, user["password_hash"])
+            try:
+                # Only try old method if password fits bcrypt limit to avoid errors
+                password_bytes = request.password.encode('utf-8')
+                if len(password_bytes) <= 72:
+                    password_valid = pwd_context.verify(request.password, user["password_hash"])
+            except (ValueError, Exception):
+                # Old method also failed, password is invalid
+                password_valid = False
         
         if not password_valid:
             raise HTTPException(status_code=401, detail="Invalid credentials")
