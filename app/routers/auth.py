@@ -107,10 +107,7 @@ def create_token(user_id: str, company_id: str, role: str) -> str:
 @router.post("/register")
 async def register(request: RegisterRequest):
     try:
-        # Validate password
-        if len(request.password) < 6:
-            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-        
+        # No password length restrictions - SHA-256 pre-hashing supports any length
         # Check if user already exists
         existing_user = execute_query(
             "SELECT id FROM users WHERE email = %s",
@@ -125,16 +122,9 @@ async def register(request: RegisterRequest):
         company_slug = get_unique_company_slug(base_slug)
         
         # Hash password: pre-hash with SHA-256 to support any length, then bcrypt
-        # This allows passwords longer than bcrypt's 72-byte limit
-        try:
-            prepared_password = prepare_password_for_bcrypt(request.password)
-            password_hash = pwd_context.hash(prepared_password)
-        except Exception as e:
-            # Catch any bcrypt errors and provide user-friendly message
-            error_msg = str(e)
-            if "72" in error_msg or "bytes" in error_msg.lower():
-                raise HTTPException(status_code=400, detail="Password hashing failed. Please try a shorter password.")
-            raise HTTPException(status_code=400, detail="Password hashing failed. Please try again.")
+        # SHA-256 always produces 64 bytes (hex string), well under bcrypt's 72-byte limit
+        prepared_password = prepare_password_for_bcrypt(request.password)
+        password_hash = pwd_context.hash(prepared_password)
         
         # Use a single connection for both operations to ensure consistency
         conn = get_db()

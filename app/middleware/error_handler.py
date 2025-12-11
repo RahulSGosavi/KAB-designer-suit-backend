@@ -34,15 +34,15 @@ def setup_error_handlers(app: FastAPI):
 
     @app.exception_handler(Exception)
     async def general_exception_handler(request: Request, exc: Exception):
+        # Log the actual error for debugging but don't expose it to users
+        import traceback
         error_msg = str(exc)
-        # Hide technical bcrypt errors from users
-        if "72" in error_msg and ("bytes" in error_msg.lower() or "bcrypt" in error_msg.lower()):
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Password processing error. Please try a different password."}
-            )
+        print(f"Unhandled exception: {error_msg}")
+        print(traceback.format_exc())
+        
+        # Don't expose technical details to users
         return JSONResponse(
             status_code=500,
-            content={"error": "Internal server error"}
+            content={"error": "An error occurred. Please try again."}
         )
 
