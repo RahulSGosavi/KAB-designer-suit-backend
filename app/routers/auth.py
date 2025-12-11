@@ -18,12 +18,11 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 def prepare_password_for_bcrypt(password: str) -> str:
     """
     Pre-hash password with SHA-256 to allow passwords longer than bcrypt's 72-byte limit.
-    This is a common pattern that maintains security while removing length restrictions.
+    Returns a hex string (64 characters = 64 bytes when UTF-8 encoded).
     """
-    # Hash with SHA-256 (always 64 bytes, well under bcrypt's 72-byte limit)
     password_bytes = password.encode('utf-8')
-    sha256_hash = hashlib.sha256(password_bytes).hexdigest()
-    return sha256_hash
+    sha256_binary = hashlib.sha256(password_bytes).digest()
+    return sha256_binary.hex()
 
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
 JWT_EXPIRES_IN = os.getenv("JWT_EXPIRES_IN", "7d")
@@ -122,8 +121,16 @@ async def register(request: RegisterRequest):
         company_slug = get_unique_company_slug(base_slug)
         
         # Hash password: pre-hash with SHA-256 to support any length, then bcrypt
-        # SHA-256 always produces 64 bytes (hex string), well under bcrypt's 72-byte limit
-        prepared_password = prepare_password_for_bcrypt(request.password)
+        # Use SHA-256 binary digest (32 bytes) converted to hex (64 chars) to ensure it's well under 72 bytes
+        password_bytes = request.password.encode('utf-8')
+        sha256_binary = hashlib.sha256(password_bytes).digest()
+        # Convert to hex string for bcrypt (64 characters, 64 bytes when UTF-8 encoded)
+        prepared_password = sha256_binary.hex()
+        
+        # Double-check it's safe for bcrypt
+        if len(prepared_password.encode('utf-8')) > 72:
+            raise AppError("Internal error: password preparation failed", 500)
+        
         password_hash = pwd_context.hash(prepared_password)
         
         # Use a single connection for both operations to ensure consistency
